@@ -514,7 +514,7 @@ var S={
   av:"🧙",pet:"",own:["av:🧙"],
   c:{},cl:{},lc:{},
   snd:1,mus:0,theme:"",
-  name:"",code:genShortCode(),
+  name:"",code:genShortCode(),room:"CODEKIDS",
   sec:0,ses:0,first:Date.now(),day:"",ds:0
 };
 
@@ -523,6 +523,7 @@ try{
   if(z)S=Object.assign(S,z);
 }catch(e){}
 if(!S.code||S.code.length!==6)S.code=genShortCode();
+S.room=(String(S.room||"CODEKIDS").trim().toUpperCase().replace(/[^A-Z0-9_-]/g,""))||"CODEKIDS";
 S.c=Object.assign({},C0,S.c);
 
 /* Application immédiate du thème clair/sombre */
@@ -542,12 +543,13 @@ applyTheme();
 
 /* Firebase + Stockage local de secours */
 var appId=typeof __app_id!=="undefined"?__app_id:"codekids-live";
-var db=null,auth=null,user=null,isAdmin=false,allPlayers=[];
+var db=null,auth=null,user=null,isAdmin=false,allPlayers=[],unsubRoster=null;
 var dirty=1;
 
 function playerPayload(){
   return {
     code:S.code,
+    room:S.room||"CODEKIDS",
     name:(S.name||"").trim()||"Petit codeur",
     av:S.av||"🧙",
     pet:S.pet||"",
@@ -580,9 +582,39 @@ function save(){
   saveLocalRoster();
 }
 
+function subscribeRoom(){
+  if(!db||!user)return;
+  if(typeof unsubRoster==="function"){try{unsubRoster()}catch(e){}}
+  var colRef=collection(db,"artifacts",appId,"public","data","players_"+S.room);
+  unsubRoster=onSnapshot(colRef,function(snap){
+    var list=[];
+    snap.forEach(function(d){
+      var data=d.data()||{};
+      list.push(Object.assign({code:d.id},data));
+    });
+    var localMap={};
+    try{localMap=JSON.parse(localStorage.getItem("ck2_players")||"{}")}catch(e){}
+    var merged={};
+    Object.keys(localMap).forEach(function(k){
+      if((localMap[k].room||"CODEKIDS")===S.room)merged[k]=localMap[k];
+    });
+    list.forEach(function(p){
+      if(p&&p.code)merged[p.code]=p;
+    });
+    allPlayers=Object.keys(merged).map(function(k){return merged[k]}).sort(function(a,b){return(b.xp||0)-(a.xp||0)});
+    renderRank();
+    if(isAdmin)renderAdmin();
+  },function(err){
+    /* Repli éventuel si besoin */
+  });
+}
+
 async function initCloud(){
   try{
-    if(typeof __firebase_config==="undefined")return;
+    if(typeof __firebase_config==="undefined"){
+      renderRank();
+      return;
+    }
     var cfg=JSON.parse(__firebase_config);
     var app=initializeApp(cfg);
     auth=getAuth(app);
@@ -593,30 +625,14 @@ async function initCloud(){
       await signInAnonymously(auth);
     }
     user=auth.currentUser;
-    if(!user)return;
+    if(!user){renderRank();return;}
 
-    /* Écoute temps réel de tous les joueurs */
-    var colRef=collection(db,"artifacts",appId,"public","data","players");
-    onSnapshot(colRef,function(snap){
-      var list=[];
-      snap.forEach(function(d){
-        var data=d.data()||{};
-        list.push(Object.assign({code:d.id},data));
-      });
-      /* Fusionner avec localStorage au cas où */
-      var localMap={};
-      try{localMap=JSON.parse(localStorage.getItem("ck2_players")||"{}")}catch(e){}
-      var merged={};
-      Object.keys(localMap).forEach(function(k){merged[k]=localMap[k]});
-      list.forEach(function(p){merged[p.code]=p});
-      allPlayers=Object.keys(merged).map(function(k){return merged[k]}).sort(function(a,b){return(b.xp||0)-(a.xp||0)});
-      renderRank();
-      if(isAdmin)renderAdmin();
-    },function(){});
-
+    subscribeRoom();
     dirty=1;
-    sync();
-  }catch(e){}
+    await sync();
+  }catch(e){
+    renderRank();
+  }
 }
 
 async function sync(){
@@ -626,9 +642,9 @@ async function sync(){
   dirty=0;
   try{
     var pl=playerPayload();
-    var pRef=doc(db,"artifacts",appId,"public","data","players",S.code);
+    var pRef=doc(db,"artifacts",appId,"public","data","players_"+S.room,S.code);
     await setDoc(pRef,pl,{merge:true});
-    var sRef=doc(db,"artifacts",appId,"public","data","saves",S.code);
+    var sRef=doc(db,"artifacts",appId,"public","data","saves_"+S.room,S.code);
     await setDoc(sRef,{state:JSON.stringify(S),updated:Date.now()},{merge:true});
   }catch(e){
     dirty=1;
@@ -644,7 +660,7 @@ async function loadByShortCode(rawCode){
   var found=null;
   if(db&&user){
     try{
-      var sRef=doc(db,"artifacts",appId,"public","data","saves",code);
+      var sRef=doc(db,"artifacts",appId,"public","data","saves_"+S.room,code);
       var snap=await getDoc(sRef);
       if(snap.exists()&&snap.data().state){
         found=JSON.parse(snap.data().state);
@@ -658,8 +674,10 @@ async function loadByShortCode(rawCode){
     }catch(e){}
   }
   if(found&&typeof found.xp==="number"){
+    var keepRoom=S.room;
     S=Object.assign(S,found);
     S.code=code;
+    S.room=keepRoom;
     S.c=Object.assign({},C0,S.c);
     applyTheme();
     save();
@@ -817,7 +835,7 @@ function home(){
     '<p style="margin:0 0 8px">'+(needPseudo?'Entre ton pseudo pour entrer dans le classement :':'Prêt pour une nouvelle aventure ?')+'</p>'+
     '<input id="nm" maxlength="14" placeholder="Ton pseudo de joueur" value="'+esc(S.name)+'" aria-label="Pseudo">'+
     (needPseudo?'<br><button class="btn y" id="valPseudo" style="margin-top:8px">🚀 Valider mon pseudo</button>':'')+
-    '<p style="margin:8px 0 0;font-size:14px">📅 '+S.ds+' jour(s) de suite · ⏳ '+fmt(S.sec)+' de code</p>';
+    '<p style="margin:8px 0 0;font-size:14px">📅 '+S.ds+' jour(s) de suite · ⏳ '+fmt(S.sec)+' de code · 🌐 Salon : <b>'+esc(S.room)+'</b></p>';
 
   var h='<h2>🚀 Joue maintenant</h2><div class="grid"><button class="tile t9" data-go="quiz"><b>❓</b>Quiz</button>'+
     GL.map(function(g,i){return'<button class="tile t'+(i+1)+'" data-g="'+g[0]+'"><b>'+g[1]+'</b>'+g[2]+'</button>'}).join("")+'</div>'+
@@ -827,9 +845,9 @@ function home(){
     h+='<div class="card mis'+(S.cl[i]?' d':'')+'"><span>'+(S.cl[i]?'✅':'🎯')+' '+x[0]+'</span><div class="bar"><i style="width:'+v/x[2]*100+'%"></i></div><b>'+v+'/'+x[2]+'</b></div>';
   });
   h+='<div class="card" style="text-align:center">'+
-    '<h3>🔑 Mon Code Court Joueur</h3>'+
-    '<p style="margin:0 0 6px;font-size:14px">Retrouve ta partie sur un autre appareil avec ton code de 6 caractères :</p>'+
-    '<div class="code-box"><span class="code-badge">'+esc(S.code)+'</span><button class="btn y sm" id="openCodeModalBtn">🔄 Copier / Charger un code</button></div>'+
+    '<h3>🔑 Mon Code & Salon Multijoueur</h3>'+
+    '<p style="margin:0 0 6px;font-size:14px">Partage le salon <b>'+esc(S.room)+'</b> avec tes amis pour apparaître ensemble dans le classement :</p>'+
+    '<div class="code-box"><span class="code-badge">'+esc(S.code)+'</span><button class="btn y sm" id="openCodeModalBtn">🔄 Code & Salon</button></div>'+
     '</div>';
   $("hb").innerHTML=h;
 }
@@ -862,8 +880,12 @@ function getRoster(){
   var cur=playerPayload();
   localMap[cur.code]=cur;
   var merged={};
-  Object.keys(localMap).forEach(function(k){merged[k]=localMap[k]});
-  allPlayers.forEach(function(p){if(p&&p.code)merged[p.code]=p});
+  Object.keys(localMap).forEach(function(k){
+    if((localMap[k].room||"CODEKIDS")===S.room)merged[k]=localMap[k];
+  });
+  allPlayers.forEach(function(p){
+    if(p&&p.code&&(p.room||"CODEKIDS")===S.room)merged[p.code]=p;
+  });
   merged[cur.code]=cur;
   return Object.keys(merged).map(function(k){return merged[k]}).sort(function(a,b){return(b.xp||0)-(a.xp||0)});
 }
